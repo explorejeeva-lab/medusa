@@ -551,3 +551,157 @@ get paymentIntentOptions() {
 | Store payment collection | `packages/medusa/src/api/store/payment-collections/route.ts` |
 | Payment data models | `packages/modules/payment/src/models/` |
 | Payment DTOs/types | `packages/core/types/src/payment/` |
+
+
+
+
+
+  ---
+  Phase 1 — Frontend collects card
+
+  Customer types card number on the frontend. Stripe.js (a JavaScript library) handles this and creates a PaymentMethod on Stripe's servers. Medusa is not involved here at all.
+
+  ---
+  Phase 2 — Medusa creates a PaymentIntent
+
+  When customer clicks "Place Order":
+
+  Frontend → POST /store/carts/{id}/complete
+                ↓
+           Medusa calls stripe.paymentIntents.create()
+                ↓
+           Stripe returns:  { id: "pi_xxx", client_secret: "pi_xxx_secret_yyy", status: "requires_capture" }
+                ↓
+           Medusa maps status → AUTHORIZED
+           Creates Order
+
+  pi_xxx is stored in session.data.id — this is the key used for all future operations.
+
+  ---
+  Phase 3 — Admin captures money
+
+  Admin clicks "Capture"
+      ↓
+  Medusa reads session.data.id = "pi_xxx"
+      ↓
+  stripe.paymentIntents.capture("pi_xxx")
+      ↓
+  Money moves from customer → merchant
+
+  ---
+  Refund works the same way
+
+  Admin clicks "Refund"
+      ↓
+  Medusa reads session.data.id = "pi_xxx"
+      ↓
+  stripe.refunds.create({ payment_intent: "pi_xxx", amount: ... })
+
+  ---
+  One line summary: Medusa stores the Stripe PaymentIntent ID in session.data.id during checkout, then uses that same ID for every operation — capture, refund, cancel.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  POST /store/payment-collections/{id}/payment-sessions
+      ↓
+  createPaymentSessionsWorkflow
+      ↓
+  createPaymentSessionStep
+      ↓
+  PaymentModule.createPaymentSession()
+      ↓
+  PaymentProviderService.createSession()
+      ↓
+  provider.initiatePayment()           ← stripe-base.ts:262
+      ↓
+  stripe.paymentIntents.create()
+
+  So stripe.paymentIntents.create() is called the moment the frontend posts to /payment-sessions — not at cart completion. That's when the Stripe PaymentIntent is created and client_secret is returned to the frontend so Stripe.js can collect the
+  card details.
+
+  The corrected mental model:
+
+  1. Frontend → POST /store/payment-collections/{id}/payment-sessions
+               → Medusa calls stripe.paymentIntents.create()
+               → Returns client_secret to frontend
+
+  2. Frontend uses client_secret with Stripe.js to collect card details
+     (Stripe handles card tokenization — Medusa not involved)
+
+  3. Frontend → POST /store/carts/{id}/complete
+               → Medusa calls stripe.paymentIntents.retrieve(pi_xxx)
+               → Maps status → AUTHORIZED
+               → Creates Order
+
+  So the sequence is create intent first, collect card second — not the other way around.
+
+
+
+
+
+
+
+    ---
+  Step 1 — Get an admin auth token
+
+  curl -X POST http://localhost:9000/auth/user/emailpass \
+    -H "Content-Type: application/json" \
+    -d '{"email": "admin@medusa-test.com", "password": "supersecret"}' \
+    | jq '.token'
+
+  Save the token as ADMIN_TOKEN.
+
+  ---
+  Step 2 — Link the Stripe provider to a region
+
+  First get your region id:
+  curl http://localhost:9000/admin/regions \
+    -H "Authorization: Bearer $ADMIN_TOKEN" | jq '.regions[].id'
+
+  Then link the provider:
+  curl -X POST http://localhost:9000/admin/regions/$REGION_ID \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{"payment_providers": ["pp_hyperswitch-prism_hyperswitch-prism-stripe"]}'
+
+  ---
+  Step 3 — Create a cart (store side)
+
+  curl -X POST http://localhost:9000/store/carts \
+    -H "Content-Type: application/json" \
+    -d '{"region_id": "$REGION_ID"}' | jq '.cart.id'
+
+  Save as CART_ID.
+
+  ---
+  Step 4 — Create a payment collection
+
+  curl -X POST http://localhost:9000/store/payment-collections \
+    -H "Content-Type: application/json" \
+    -d '{"cart_id": "$CART_ID"}' | jq '.payment_collection.id'
+
+  Save as PAYMENT_COLLECTION_ID.
+
+  ---
+  Step 5 — Initialize payment session (calls initiatePayment)
+
+  curl -X POST http://localhost:9000/store/payment-collections/$PAYMENT_COLLECTION_ID/payment-sessions \
+    -H "Content-Type: application/json" \
+    -d '{"provider_id": "pp_hyperswitch-prism_hyperswitch-prism-stripe"}'
