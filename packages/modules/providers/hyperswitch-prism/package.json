@@ -1,0 +1,32 @@
+{
+  "name": "@medusajs/payment-hyperswitch-prism",
+  "version": "2.15.2",
+  "description": "Hyperswitch Prism payment provider for Medusa",
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "!dist/**/__tests__",
+    "!dist/**/__mocks__"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "../../../../node_modules/.bin/jest --passWithNoTests src",
+    "build": "yarn run -T rimraf dist && yarn run -T tsc --build ./tsconfig.json",
+    "watch": "yarn run -T tsc --watch"
+  },
+  "devDependencies": {
+    "@medusajs/framework": "2.15.2"
+  },
+  "peerDependencies": {
+    "@medusajs/framework": "2.15.2"
+  },
+  "dependencies": {
+    "hyperswitch-prism": "latest"
+  },
+  "keywords": [
+    "medusa-plugin",
+    "medusa-plugin-payment"
+  ]
+}
