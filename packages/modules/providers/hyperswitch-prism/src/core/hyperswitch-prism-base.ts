@@ -25,15 +25,13 @@ import {
   WebhookActionResult,
 } from "@medusajs/framework/types"
 import { HyperswitchPrismOptions } from "../types"
-import StripeService from "../services/stripe"
-import GlobalpayService from "../services/globalpay"
+import PrismService from "../services/prism"
 
 class HyperswitchPrismBase extends AbstractPaymentProvider<HyperswitchPrismOptions> {
   static identifier = "hyperswitch-prism"
 
   protected options_: HyperswitchPrismOptions
-  protected stripeService_: StripeService | null = null
-  protected globalpayService_: GlobalpayService | null = null
+  protected prismService_: PrismService
 
   constructor(
     cradle: Record<string, unknown>,
@@ -42,11 +40,7 @@ class HyperswitchPrismBase extends AbstractPaymentProvider<HyperswitchPrismOptio
     // @ts-ignore
     super(...arguments)
     this.options_ = options
-    if (options.connector === "stripe") {
-      this.stripeService_ = new StripeService(options as any)
-    } else {
-      this.globalpayService_ = new GlobalpayService(options as any)
-    }
+    this.prismService_ = new PrismService(options)
   }
 
   static validateOptions(options: HyperswitchPrismOptions): void {
@@ -65,51 +59,33 @@ class HyperswitchPrismBase extends AbstractPaymentProvider<HyperswitchPrismOptio
   async initiatePayment(
     input: InitiatePaymentInput
   ): Promise<InitiatePaymentOutput> {
-    if (this.options_.connector === "stripe") {
-      return this.stripeService_!.initiatePayment(input)
-    }
-    return this.globalpayService_!.initiatePayment(input)
+    return this.prismService_.initiatePayment(input)
   }
 
   async authorizePayment(
     input: AuthorizePaymentInput
   ): Promise<AuthorizePaymentOutput> {
-    if (this.options_.connector === "stripe") {
-      return this.stripeService_!.authorizePayment(input)
-    }
-    return this.globalpayService_!.authorize(input as any) as Promise<AuthorizePaymentOutput>
+    return this.prismService_.authorizePayment(input)
   }
 
   async getPaymentStatus(
     input: GetPaymentStatusInput
   ): Promise<GetPaymentStatusOutput> {
-    if (this.options_.connector === "stripe") {
-      return this.stripeService_!.getPaymentStatus(input)
-    }
-    return this.globalpayService_!.getPaymentStatus(input)
+    return this.prismService_.getPaymentStatus(input)
   }
 
   async capturePayment(
     input: CapturePaymentInput
   ): Promise<CapturePaymentOutput> {
-    if (this.options_.connector === "stripe") {
-      return this.stripeService_!.capture(input)
-    }
-    return this.globalpayService_!.capture(input)
+    return this.prismService_.capture(input)
   }
 
   async refundPayment(input: RefundPaymentInput): Promise<RefundPaymentOutput> {
-    if (this.options_.connector === "stripe") {
-      return this.stripeService_!.refund(input)
-    }
-    return this.globalpayService_!.refund(input)
+    return this.prismService_.refund(input)
   }
 
   async cancelPayment(input: CancelPaymentInput): Promise<CancelPaymentOutput> {
-    if (this.options_.connector === "stripe") {
-      return this.stripeService_!.cancel(input)
-    }
-    return this.globalpayService_!.cancel(input)
+    return this.prismService_.cancel(input)
   }
 
   async deletePayment(
@@ -121,10 +97,7 @@ class HyperswitchPrismBase extends AbstractPaymentProvider<HyperswitchPrismOptio
   async retrievePayment(
     input: RetrievePaymentInput
   ): Promise<RetrievePaymentOutput> {
-    if (this.options_.connector === "stripe") {
-      return this.stripeService_!.retrieve(input)
-    }
-    return this.globalpayService_!.retrieve(input)
+    return this.prismService_.retrieve(input)
   }
 
   async updatePayment(input: UpdatePaymentInput): Promise<UpdatePaymentOutput> {
@@ -135,10 +108,7 @@ class HyperswitchPrismBase extends AbstractPaymentProvider<HyperswitchPrismOptio
   async getWebhookActionAndData(
     webhookData: ProviderWebhookPayload["payload"]
   ): Promise<WebhookActionResult> {
-    if (this.options_.connector === "stripe") {
-      return this.stripeService_!.handleWebhook(webhookData)
-    }
-    return this.globalpayService_!.handleWebhook(webhookData)
+    return this.prismService_.handleWebhook(webhookData)
   }
 }
 

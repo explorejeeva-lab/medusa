@@ -25,7 +25,7 @@ import {
   WebhookActionResult,
 } from "@medusajs/framework/types"
 import { PaymentActions, PaymentSessionStatus, isDefined } from "@medusajs/framework/utils"
-import { HyperswitchPrismStripeOptions } from "../types"
+import { HyperswitchPrismOptions } from "../types"
 import { toMinorAmount, fromMinorAmount } from "../utils"
 
 type PrismConfig = {
@@ -33,16 +33,16 @@ type PrismConfig = {
   options: { environment: types.Environment }
 }
 
-class StripeService {
+class PrismService {
   private paymentClient_: PaymentClient
   private authClient_: MerchantAuthenticationClient
   private eventClient_: EventClient
-  private options_: HyperswitchPrismStripeOptions
+  private options_: HyperswitchPrismOptions
 
-  constructor(options: HyperswitchPrismStripeOptions) {
+  constructor(options: HyperswitchPrismOptions) {
     this.options_ = options
     const prismConfig: PrismConfig = {
-      connectorConfig: { stripe: options.connectorConfig },
+      connectorConfig: { [options.connector]: options.connectorConfig },
       options: {
         environment:
           options.environment === "PRODUCTION"
@@ -110,6 +110,13 @@ class StripeService {
     )
   }
 
+  // Stripe stores the transaction ID as `id`; GlobalPay stores it as `connectorTransactionId`
+  private getTransactionId(data: any): string | undefined {
+    return this.options_.connector === "stripe"
+      ? data?.id
+      : data?.connectorTransactionId
+  }
+
   async initiatePayment({
     currency_code,
     amount,
@@ -123,57 +130,101 @@ class StripeService {
     const minorAmount = toMinorAmount(Number(amount), currency_code)
 
     try {
-      const res = await this.authClient_.createClientAuthenticationToken({
-        merchantClientSessionId,
-        payment: {
-          amount: {
-            minorAmount,
-            currency: this.toCurrency(currency_code),
-          },
-        },
-      })
-
-      const statusCode = (res as any).statusCode as number | undefined
-      if (statusCode !== undefined && statusCode !== 200) {
-        throw new Error(
-          (res as any).error?.message ?? "createClientAuthenticationToken failed"
-        )
-      }
-
-      const sessionData =
-        (res as any).sessionData ?? (res as any).session_data ?? {}
-      const connectorSpecific =
-        sessionData?.connectorSpecific ?? sessionData?.connector_specific ?? {}
-      const connectorData = connectorSpecific.stripe ?? connectorSpecific
-
-      // Prism wraps scalar fields as { value: "..." } objects
-      const rawClientSecret =
-        connectorData?.clientSecret ?? connectorData?.client_secret ?? null
-      const clientSecret: string | null =
-        rawClientSecret && typeof rawClientSecret === "object" && "value" in rawClientSecret
-          ? (rawClientSecret as any).value
-          : typeof rawClientSecret === "string"
-          ? rawClientSecret
-          : null
-
-      // PaymentIntent ID is embedded in client_secret: "pi_xxx_secret_yyy" → "pi_xxx"
-      const connectorTransactionId =
-        typeof clientSecret === "string"
-          ? clientSecret.split("_secret_")[0]
-          : merchantClientSessionId
-
-      return {
-        id: connectorTransactionId,
-        data: {
-          id: connectorTransactionId,
-          client_secret: clientSecret,
-          currency: currency_code,
-          minorAmount,
-          connector: "stripe",
+      if (this.options_.connector === "stripe") {
+        const res = await this.authClient_.createClientAuthenticationToken({
           merchantClientSessionId,
-          sessionData,
-        },
-        status: PaymentSessionStatus.PENDING,
+          payment: {
+            amount: {
+              minorAmount,
+              currency: this.toCurrency(currency_code),
+            },
+          },
+        })
+
+        const statusCode = (res as any).statusCode as number | undefined
+        if (statusCode !== undefined && statusCode !== 200) {
+          throw new Error(
+            (res as any).error?.message ?? "createClientAuthenticationToken failed"
+          )
+        }
+
+        const sessionData =
+          (res as any).sessionData ?? (res as any).session_data ?? {}
+        const connectorSpecific =
+          sessionData?.connectorSpecific ?? sessionData?.connector_specific ?? {}
+        const connectorData = connectorSpecific.stripe ?? connectorSpecific
+
+        // Prism wraps scalar fields as { value: "..." } objects
+        const rawClientSecret =
+          connectorData?.clientSecret ?? connectorData?.client_secret ?? null
+        const clientSecret: string | null =
+          rawClientSecret && typeof rawClientSecret === "object" && "value" in rawClientSecret
+            ? (rawClientSecret as any).value
+            : typeof rawClientSecret === "string"
+            ? rawClientSecret
+            : null
+
+        // PaymentIntent ID is embedded in client_secret: "pi_xxx_secret_yyy" → "pi_xxx"
+        const connectorTransactionId =
+          typeof clientSecret === "string"
+            ? clientSecret.split("_secret_")[0]
+            : merchantClientSessionId
+
+        return {
+          id: connectorTransactionId,
+          data: {
+            id: connectorTransactionId,
+            client_secret: clientSecret,
+            currency: currency_code,
+            minorAmount,
+            connector: "stripe",
+            merchantClientSessionId,
+            sessionData,
+          },
+          status: PaymentSessionStatus.PENDING,
+        }
+      } else {
+        const currency = this.toCurrency(currency_code)
+
+        const res = await this.authClient_.createClientAuthenticationToken({
+          merchantClientSessionId,
+          payment: {
+            amount: {
+              minorAmount,
+              currency,
+            },
+          },
+          // GlobalPay requires explicit permission to create a payment
+          permissions: {
+            codes: ["PMT_POST_Create_Single"],
+          },
+        } as any)
+
+        const statusCode = (res as any).statusCode as number | undefined
+        if (statusCode !== undefined && statusCode !== 200) {
+          throw new Error(
+            (res as any).error?.message ?? "createClientAuthenticationToken failed"
+          )
+        }
+
+        const accessToken =
+          (res as any).accessToken ??
+          (res as any).access_token ??
+          null
+
+        return {
+          id: merchantClientSessionId,
+          data: {
+            accessToken,
+            tokenType: (res as any).tokenType ?? (res as any).token_type,
+            expiresIn: (res as any).expiresIn ?? (res as any).expires_in,
+            minorAmount,
+            currency: currency_code,
+            merchantClientSessionId,
+            connector: "globalpay",
+          },
+          status: PaymentSessionStatus.PENDING,
+        }
       }
     } catch (error) {
       throw this.buildError("An error occurred in initiatePayment", error)
@@ -183,13 +234,45 @@ class StripeService {
   async authorizePayment(
     input: AuthorizePaymentInput
   ): Promise<AuthorizePaymentOutput> {
-    return this.getPaymentStatus(input) as Promise<AuthorizePaymentOutput>
+    if (this.options_.connector === "stripe") {
+      // Stripe's PaymentIntent model handles auth implicitly on the frontend
+      return this.getPaymentStatus(input) as Promise<AuthorizePaymentOutput>
+    }
+
+    // GlobalPay requires an explicit server-side authorize call after the frontend collects the payment token
+    const { data } = input as any
+    try {
+      const res = await (this.paymentClient_ as any).authorize({
+        merchantTransactionId: (data as any).merchantClientSessionId,
+        amount: {
+          minorAmount: (data as any).minorAmount,
+          currency: this.toCurrency((data as any).currency as string),
+        },
+        captureMethod: this.options_.capture
+          ? types.CaptureMethod.AUTOMATIC
+          : types.CaptureMethod.MANUAL,
+        paymentMethod: (data as any).paymentMethod,
+      })
+
+      const connectorTransactionId =
+        (res as any).connectorTransactionId ??
+        (res as any).connector_transaction_id
+
+      return {
+        data: { ...(data as any), connectorTransactionId, raw: res },
+        status: this.mapPrismStatus(
+          (res as any).status ?? types.PaymentStatus.PAYMENT_STATUS_UNSPECIFIED
+        ),
+      }
+    } catch (error) {
+      throw this.buildError("An error occurred in authorizePayment", error)
+    }
   }
 
   async getPaymentStatus({
     data,
   }: GetPaymentStatusInput): Promise<GetPaymentStatusOutput> {
-    const connectorTransactionId = (data as any)?.id as string | undefined
+    const connectorTransactionId = this.getTransactionId(data)
     if (!connectorTransactionId) {
       return { data, status: PaymentSessionStatus.PENDING }
     }
@@ -218,7 +301,7 @@ class StripeService {
     data,
     context,
   }: CapturePaymentInput): Promise<CapturePaymentOutput> {
-    const connectorTransactionId = (data as any)?.id as string
+    const connectorTransactionId = this.getTransactionId(data) as string
 
     try {
       const res = await this.paymentClient_.capture({
@@ -239,7 +322,7 @@ class StripeService {
     amount,
     context,
   }: RefundPaymentInput): Promise<RefundPaymentOutput> {
-    const connectorTransactionId = (data as any)?.id as string
+    const connectorTransactionId = this.getTransactionId(data) as string
     const currency = (data as any)?.currency as string
 
     try {
@@ -273,7 +356,7 @@ class StripeService {
     data,
     context,
   }: CancelPaymentInput): Promise<CancelPaymentOutput> {
-    const connectorTransactionId = (data as any)?.id as string | undefined
+    const connectorTransactionId = this.getTransactionId(data)
     if (!connectorTransactionId) {
       return { data }
     }
@@ -286,8 +369,7 @@ class StripeService {
       })
       return { data }
     } catch (error) {
-      // Stripe returns 400 when the PaymentIntent is already in a terminal state
-      // (succeeded, canceled). Treat these as a no-op — the session is gone anyway.
+      // Treat 400 from connector as a no-op — payment is already in a terminal state
       if (error instanceof ConnectorError && error.httpStatusCode === 400) {
         return { data }
       }
@@ -298,7 +380,7 @@ class StripeService {
   async retrieve({
     data,
   }: RetrievePaymentInput): Promise<RetrievePaymentOutput> {
-    const connectorTransactionId = (data as any)?.id as string
+    const connectorTransactionId = this.getTransactionId(data) as string
     const currency = (data as any)?.currency as string
     const minorAmount = (data as any)?.minorAmount as number | undefined
     try {
@@ -413,4 +495,4 @@ class StripeService {
   }
 }
 
-export default StripeService
+export default PrismService
