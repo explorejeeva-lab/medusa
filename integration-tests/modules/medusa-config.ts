@@ -24,6 +24,35 @@ const customPaymentProvider = {
   id: "default_2",
 }
 
+const hyperswitchPrismStripeProvider = {
+  resolve: "@medusajs/payment-hyperswitch-prism",
+  id: "hyperswitch-prism-stripe",
+  options: {
+    connector: "stripe",
+    connectorConfig: {
+      apiKey: { value: process.env.STRIPE_API_KEY ?? "" },
+    },
+    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET ?? "",
+    environment: "SANDBOX",
+    capture: false,
+  },
+}
+
+const hyperswitchPrismGlobalpayProvider = {
+  resolve: "@medusajs/payment-hyperswitch-prism",
+  id: "hyperswitch-prism-globalpay",
+  options: {
+    connector: "globalpay",
+    connectorConfig: {
+      appId: { value: process.env.GLOBALPAY_APP_ID ?? "" },
+      appKey: { value: process.env.GLOBALPAY_APP_KEY ?? "" },
+    },
+    webhookSecret: process.env.GLOBALPAY_WEBHOOK_SECRET ?? "",
+    environment: "SANDBOX",
+    capture: false,
+  },
+}
+
 const customFulfillmentProvider = {
   resolve: "@medusajs/fulfillment-manual",
   id: "test-provider",
@@ -157,7 +186,7 @@ module.exports = defineConfig({
       key: Modules.PAYMENT,
       resolve: "@medusajs/payment",
       options: {
-        providers: [customPaymentProvider],
+        providers: [customPaymentProvider, hyperswitchPrismStripeProvider, hyperswitchPrismGlobalpayProvider],
       },
     },
     {
