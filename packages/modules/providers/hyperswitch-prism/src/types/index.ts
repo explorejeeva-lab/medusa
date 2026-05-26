@@ -1,5 +1,5 @@
 export interface HyperswitchPrismOptions {
-  connector: "stripe" | "globalpay"
+  connector: "stripe" | "adyen"
   connectorConfig: Record<string, unknown>
   webhookSecret?: string
   environment?: "SANDBOX" | "PRODUCTION"
@@ -11,13 +11,13 @@ export interface HyperswitchPrismStripeOptions extends HyperswitchPrismOptions {
   connectorConfig: { apiKey: { value: string } }
 }
 
-export interface HyperswitchPrismGlobalpayOptions extends HyperswitchPrismOptions {
-  connector: "globalpay"
+export interface HyperswitchPrismAdyenOptions extends HyperswitchPrismOptions {
+  connector: "adyen"
   connectorConfig: {
-    appId: { value: string }
-    appKey: { value: string }
-    baseUrl?: string
+    apiKey: { value: string }
+    merchantAccount: { value: string }
   }
 }
+
 
 // Use types.PaymentStatus and types.RefundStatus from the hyperswitch-prism SDK directly.

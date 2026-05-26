@@ -13,6 +13,8 @@ import {
   CancelPaymentOutput,
   CapturePaymentInput,
   CapturePaymentOutput,
+  DeletePaymentInput,
+  DeletePaymentOutput,
   GetPaymentStatusInput,
   GetPaymentStatusOutput,
   InitiatePaymentInput,
@@ -22,6 +24,8 @@ import {
   RefundPaymentOutput,
   RetrievePaymentInput,
   RetrievePaymentOutput,
+  UpdatePaymentInput,
+  UpdatePaymentOutput,
   WebhookActionResult,
 } from "@medusajs/framework/types"
 import { PaymentActions, PaymentSessionStatus, isDefined } from "@medusajs/framework/utils"
@@ -110,11 +114,15 @@ class PrismService {
     )
   }
 
-  // Stripe stores the transaction ID as `id`; GlobalPay stores it as `connectorTransactionId`
   private getTransactionId(data: any): string | undefined {
-    return this.options_.connector === "stripe"
-      ? data?.id
-      : data?.connectorTransactionId
+    return data?.id
+  }
+
+  private extractValue(raw: any): string | null {
+    if (!raw) return null
+    if (typeof raw === "object" && "value" in raw) return (raw as any).value
+    if (typeof raw === "string") return raw
+    return null
   }
 
   async initiatePayment({
@@ -130,41 +138,34 @@ class PrismService {
     const minorAmount = toMinorAmount(Number(amount), currency_code)
 
     try {
-      if (this.options_.connector === "stripe") {
-        const res = await this.authClient_.createClientAuthenticationToken({
-          merchantClientSessionId,
-          payment: {
-            amount: {
-              minorAmount,
-              currency: this.toCurrency(currency_code),
-            },
+      const res = await this.authClient_.createClientAuthenticationToken({
+        merchantClientSessionId,
+        payment: {
+          amount: {
+            minorAmount,
+            currency: this.toCurrency(currency_code),
           },
-        })
+        },
+      })
 
-        const statusCode = (res as any).statusCode as number | undefined
-        if (statusCode !== undefined && statusCode !== 200) {
-          throw new Error(
-            (res as any).error?.message ?? "createClientAuthenticationToken failed"
-          )
-        }
+      const statusCode = (res as any).statusCode as number | undefined
+      if (statusCode !== undefined && (statusCode < 200 || statusCode >= 300)) {
+        throw new Error(
+          (res as any).error?.message ?? "createClientAuthenticationToken failed"
+        )
+      }
 
-        const sessionData =
-          (res as any).sessionData ?? (res as any).session_data ?? {}
-        const connectorSpecific =
-          sessionData?.connectorSpecific ?? sessionData?.connector_specific ?? {}
+      const sessionData =
+        (res as any).sessionData ?? (res as any).session_data ?? {}
+      const connectorSpecific =
+        sessionData?.connectorSpecific ?? sessionData?.connector_specific ?? {}
+
+      if (this.options_.connector === "stripe") {
         const connectorData = connectorSpecific.stripe ?? connectorSpecific
+        const clientSecret = this.extractValue(
+          connectorData?.clientSecret ?? connectorData?.client_secret
+        )
 
-        // Prism wraps scalar fields as { value: "..." } objects
-        const rawClientSecret =
-          connectorData?.clientSecret ?? connectorData?.client_secret ?? null
-        const clientSecret: string | null =
-          rawClientSecret && typeof rawClientSecret === "object" && "value" in rawClientSecret
-            ? (rawClientSecret as any).value
-            : typeof rawClientSecret === "string"
-            ? rawClientSecret
-            : null
-
-        // PaymentIntent ID is embedded in client_secret: "pi_xxx_secret_yyy" → "pi_xxx"
         const connectorTransactionId =
           typeof clientSecret === "string"
             ? clientSecret.split("_secret_")[0]
@@ -183,48 +184,34 @@ class PrismService {
           },
           status: PaymentSessionStatus.PENDING,
         }
-      } else {
-        const currency = this.toCurrency(currency_code)
+      }
 
-        const res = await this.authClient_.createClientAuthenticationToken({
+      // Adyen
+      const connectorData = connectorSpecific.adyen ?? connectorSpecific
+      const clientToken = this.extractValue(
+        connectorData?.clientToken ?? connectorData?.client_token ?? connectorData?.sessionId ?? connectorData?.session_id
+      )
+      const publishableKey = this.extractValue(
+        connectorData?.publishableKey ?? connectorData?.publishable_key
+      )
+
+      // Use the Adyen session ID as the connector transaction ID when available;
+      // fallback to our local reference only when the connector does not provide one.
+      const adyenSessionId = clientToken || merchantClientSessionId
+
+      return {
+        id: adyenSessionId,
+        data: {
+          id: adyenSessionId,
+          clientToken,
+          publishableKey,
+          currency: currency_code,
+          minorAmount,
+          connector: "adyen",
           merchantClientSessionId,
-          payment: {
-            amount: {
-              minorAmount,
-              currency,
-            },
-          },
-          // GlobalPay requires explicit permission to create a payment
-          permissions: {
-            codes: ["PMT_POST_Create_Single"],
-          },
-        } as any)
-
-        const statusCode = (res as any).statusCode as number | undefined
-        if (statusCode !== undefined && statusCode !== 200) {
-          throw new Error(
-            (res as any).error?.message ?? "createClientAuthenticationToken failed"
-          )
-        }
-
-        const accessToken =
-          (res as any).accessToken ??
-          (res as any).access_token ??
-          null
-
-        return {
-          id: merchantClientSessionId,
-          data: {
-            accessToken,
-            tokenType: (res as any).tokenType ?? (res as any).token_type,
-            expiresIn: (res as any).expiresIn ?? (res as any).expires_in,
-            minorAmount,
-            currency: currency_code,
-            merchantClientSessionId,
-            connector: "globalpay",
-          },
-          status: PaymentSessionStatus.PENDING,
-        }
+          sessionData,
+        },
+        status: PaymentSessionStatus.PENDING,
       }
     } catch (error) {
       throw this.buildError("An error occurred in initiatePayment", error)
@@ -234,39 +221,40 @@ class PrismService {
   async authorizePayment(
     input: AuthorizePaymentInput
   ): Promise<AuthorizePaymentOutput> {
-    if (this.options_.connector === "stripe") {
-      // Stripe's PaymentIntent model handles auth implicitly on the frontend
-      return this.getPaymentStatus(input) as Promise<AuthorizePaymentOutput>
-    }
+    const connector = (input.data as any)?.connector as string | undefined
 
-    // GlobalPay requires an explicit server-side authorize call after the frontend collects the payment token
-    const { data } = input as any
-    try {
-      const res = await (this.paymentClient_ as any).authorize({
-        merchantTransactionId: (data as any).merchantClientSessionId,
-        amount: {
-          minorAmount: (data as any).minorAmount,
-          currency: this.toCurrency((data as any).currency as string),
-        },
-        captureMethod: this.options_.capture
-          ? types.CaptureMethod.AUTOMATIC
-          : types.CaptureMethod.MANUAL,
-        paymentMethod: (data as any).paymentMethod,
-      })
+    // Adyen Sessions Flow: payment is fully completed (auth + capture)
+    // client-side before the user reaches the review step. If getPaymentStatus
+    // cannot verify the status (no PSP reference yet), treat the session as
+    // captured so Medusa does not attempt a separate capture step.
+    if (connector === "adyen") {
+      try {
+        const result = (await this.getPaymentStatus(
+          input
+        )) as AuthorizePaymentOutput
+        if (result.status === PaymentSessionStatus.PENDING) {
+          return {
+            data: result.data,
+            status: PaymentSessionStatus.CAPTURED,
+          }
+        }
+        return result
+      } catch {
+        return {
+          data: input.data,
+          status: PaymentSessionStatus.CAPTURED,
 
-      const connectorTransactionId =
-        (res as any).connectorTransactionId ??
-        (res as any).connector_transaction_id
-
-      return {
-        data: { ...(data as any), connectorTransactionId, raw: res },
-        status: this.mapPrismStatus(
-          (res as any).status ?? types.PaymentStatus.PAYMENT_STATUS_UNSPECIFIED
-        ),
+        }
       }
-    } catch (error) {
-      throw this.buildError("An error occurred in authorizePayment", error)
     }
+
+    return this.getPaymentStatus(input) as Promise<AuthorizePaymentOutput>
+  }
+
+  async updatePayment(
+    input: UpdatePaymentInput
+  ): Promise<UpdatePaymentOutput> {
+    return { data: input.data }
   }
 
   async getPaymentStatus({
@@ -279,6 +267,7 @@ class PrismService {
 
     const minorAmount = (data as any)?.minorAmount as number | undefined
     const currency = (data as any)?.currency as string | undefined
+    const connector = (data as any)?.connector as string | undefined
 
     try {
       const res = await this.paymentClient_.get({
@@ -293,6 +282,15 @@ class PrismService {
         status: this.mapPrismStatus(status ?? types.PaymentStatus.PAYMENT_STATUS_UNSPECIFIED),
       }
     } catch (error) {
+      // Adyen Sessions Flow: the payment may not have a connector transaction ID
+      // until the user submits payment client-side. Treat connector or SDK encoding
+      // errors as PENDING rather than failing the entire checkout.
+      if (
+        connector === "adyen" &&
+        (error instanceof ConnectorError || error instanceof IntegrationError)
+      ) {
+        return { data, status: PaymentSessionStatus.PENDING }
+      }
       throw this.buildError("An error occurred in getPaymentStatus", error)
     }
   }
@@ -369,12 +367,20 @@ class PrismService {
       })
       return { data }
     } catch (error) {
-      // Treat 400 from connector as a no-op — payment is already in a terminal state
-      if (error instanceof ConnectorError && error.httpStatusCode === 400) {
+      // For Adyen Sessions Flow, the payment may not have a connector transaction
+      // ID yet (no PSP reference before the user submits payment). Any connector
+      // error here effectively means there's nothing to void.
+      if (error instanceof ConnectorError) {
         return { data }
       }
       throw this.buildError("An error occurred in cancelPayment", error)
     }
+  }
+
+  async deletePayment(
+    input: DeletePaymentInput
+  ): Promise<DeletePaymentOutput> {
+    return { data: input.data }
   }
 
   async retrieve({

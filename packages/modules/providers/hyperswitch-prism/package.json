@@ -23,6 +23,7 @@
     "@medusajs/framework": "2.15.2"
   },
   "dependencies": {
+    "@adyen/adyen-web": "^6.36.0",
     "hyperswitch-prism": "latest"
   },
   "keywords": [
